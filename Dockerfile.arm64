@@ -1,0 +1,45 @@
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y \
+    autoconf-archive \
+    automake \
+    autopoint \
+    build-essential \
+    gettext \
+    libssl-dev \
+    pkg-config \
+    txt2man \
+    wget \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ubuntu 24.04 has autoconf 2.71, but we need 2.72+
+# Build autoconf 2.72 from source
+RUN cd /tmp && \
+    wget -q https://ftp.gnu.org/gnu/autoconf/autoconf-2.72.tar.xz && \
+    tar xf autoconf-2.72.tar.xz && \
+    cd autoconf-2.72 && \
+    ./configure --prefix=/usr/local && \
+    make -j$(nproc) && \
+    make install && \
+    rm -rf /tmp/autoconf-2.72*
+
+WORKDIR /build
+
+COPY . .
+
+RUN autopoint --force || true
+
+RUN autoreconf -fiv -I m4
+
+RUN ./configure \
+    --prefix=/usr/local \
+    --with-ssl=openssl \
+    --disable-Werror
+
+RUN make
+
+RUN make install DESTDIR=/tmp/axel-output
+
+RUN cd /tmp/axel-output && \
+    tar -czf /tmp/axel-linux-arm64.tar.gz .

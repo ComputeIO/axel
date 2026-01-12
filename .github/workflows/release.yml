@@ -1,0 +1,82 @@
+name: Create Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    name: Build and Release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release Notes
+        id: release_notes
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          {
+            echo "## Axel $VERSION"
+            echo ""
+            echo "This release includes pre-built binaries for multiple platforms:"
+            echo ""
+            echo "- **Linux x86_64**: \`axel-linux-x86_64.tar.gz\`"
+            echo "- **macOS x86_64**: \`axel-macos-x86_64.tar.gz\`"
+            echo "- **macOS ARM64**: \`axel-macos-arm64.tar.gz\`"
+            echo "- **Windows x86_64**: \`axel-windows-x86_64.zip\`"
+            echo ""
+            echo "### Installation Instructions"
+            echo ""
+            echo "#### Linux:"
+            echo "\`\`\`bash"
+            echo "tar -xzf axel-linux-x86_64.tar.gz -C /"
+            echo "which axel  # Verify installation"
+            echo "\`\`\`"
+            echo ""
+            echo "#### macOS:"
+            echo "\`\`\`bash"
+            echo "tar -xzf axel-macos-x86_64.tar.gz -C /"
+            echo "which axel  # Verify installation"
+            echo "\`\`\`"
+            echo ""
+            echo "#### Windows (using MSYS2/MinGW):"
+            echo "\`\`\`bash"
+            echo "unzip axel-windows-x86_64.zip"
+            echo "cd axel-windows-x86_64"
+            echo "./axel.exe --help"
+            echo "\`\`\`"
+            echo ""
+            echo "Or copy \`axel.exe\` and the DLL files to your preferred location in PATH."
+            echo ""
+            echo "### Build Information"
+            echo ""
+            echo "These binaries include SSL/TLS support for secure downloads."
+            echo "Built with: OpenSSL, autotools"
+          } > release_notes.md
+
+      - name: Prepare release artifacts
+        run: |
+          mkdir -p release_artifacts
+          # Flatten artifact directory structure
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release_artifacts/ \;
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release_artifacts/*
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

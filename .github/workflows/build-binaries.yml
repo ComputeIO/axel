@@ -1,0 +1,277 @@
+name: Build Binaries
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+jobs:
+  build-linux-x64:
+    runs-on: ubuntu-latest
+    name: Build Linux x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf-archive \
+            automake \
+            autopoint \
+            build-essential \
+            gettext \
+            libssl-dev \
+            pkg-config \
+            txt2man
+          
+          # Ubuntu 24.04 has autoconf 2.71, but we need 2.72+
+          # Build autoconf 2.72 from source
+          cd /tmp
+          wget -q https://ftp.gnu.org/gnu/autoconf/autoconf-2.72.tar.xz
+          tar xf autoconf-2.72.tar.xz
+          cd autoconf-2.72
+          ./configure --prefix=/usr/local
+          make -j$(nproc)
+          sudo make install
+          autoconf --version
+
+      - name: Generate build system
+        env:
+          ACLOCAL_PATH: /usr/share/aclocal
+        run: |
+          rm -f configure config.status config.log
+          # Run autopoint to copy gettext m4 macros into m4/ directory
+          autopoint --force || true
+          autoreconf -fiv -I m4 -I/usr/share/aclocal
+
+      - name: Configure
+        run: |
+          ./configure \
+            --prefix=/usr/local \
+            --with-ssl=openssl \
+            --disable-nls \
+            --disable-Werror
+
+      - name: Build
+        run: make
+
+      - name: Create distributable package
+        run: |
+          make install DESTDIR=$(pwd)/axel-linux-x86_64
+          cd axel-linux-x86_64
+          tar -czf ../axel-linux-x86_64.tar.gz .
+          cd ..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: axel-linux-x86_64
+          path: axel-linux-x86_64.tar.gz
+          retention-days: 7
+
+  build-linux-arm64:
+    runs-on: ubuntu-latest
+    name: Build Linux ARM64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ARM64 image with Buildx
+        run: |
+          docker buildx build --platform linux/arm64 -f Dockerfile.arm64 -t axel-arm64-builder --load .
+
+      - name: Extract artifact
+        run: |
+          docker run --rm -v $(pwd):/output axel-arm64-builder cp /tmp/axel-linux-arm64.tar.gz /output/
+
+      - name: Verify artifact
+        run: |
+          if [ ! -f axel-linux-arm64.tar.gz ]; then
+            echo "Error: Artifact not generated"
+            exit 1
+          fi
+          ls -lh axel-linux-arm64.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: axel-linux-arm64
+          path: axel-linux-arm64.tar.gz
+          retention-days: 7
+
+  build-macos:
+    runs-on: macos-latest
+    name: Build macOS x86_64
+    strategy:
+      matrix:
+        arch: [x86_64, arm64]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install \
+            autoconf \
+            autoconf-archive \
+            automake \
+            gettext \
+            openssl \
+            pkg-config \
+            txt2man
+          
+          # Link gettext to make it available system-wide
+          brew link --force gettext || true
+
+      - name: Generate build system
+        env:
+          GETTEXT: /opt/homebrew/opt/gettext
+          ACLOCAL_PATH: /opt/homebrew/opt/gettext/share/aclocal:/opt/homebrew/share/aclocal
+        run: |
+          export PATH="/opt/homebrew/opt/gettext/bin:$PATH"
+          rm -f configure config.status config.log
+          mkdir -p m4
+          # Create stub gettext macros since we use --disable-nls
+          # This avoids autopoint/gettext issues while satisfying autoconf
+          cat > m4/gettext-stub.m4 << 'EOF'
+          AC_DEFUN([AM_GNU_GETTEXT], [])
+          AC_DEFUN([AM_GNU_GETTEXT_VERSION], [])
+          AC_DEFUN([AM_GNU_GETTEXT_NEED], [])
+          AC_DEFUN([AM_ICONV_LINK], [])
+          EOF
+          # Explicitly tell autoreconf to look in m4/ directory first
+          autoreconf -fiv -I m4 -I/opt/homebrew/opt/gettext/share/aclocal -I/opt/homebrew/share/aclocal
+
+      - name: Configure
+        env:
+          GETTEXT: /opt/homebrew/opt/gettext
+          OPENSSL: /opt/homebrew/opt/openssl
+        run: |
+          export PATH="/opt/homebrew/opt/gettext/bin:/opt/homebrew/opt/openssl/bin:$PATH"
+          CFLAGS="-I$OPENSSL/include -I$GETTEXT/include -arch ${{ matrix.arch }}" \
+          LDFLAGS="-L$OPENSSL/lib -L$GETTEXT/lib -arch ${{ matrix.arch }}" \
+          ./configure \
+            --prefix=/opt/homebrew \
+            --with-ssl=openssl \
+            --disable-nls \
+            --disable-Werror
+
+      - name: Build
+        run: make clean && make
+
+      - name: Verify build
+        run: |
+          if [ ! -f src/axel ]; then
+            echo "Error: Binary not built"
+            tree src/
+            exit 1
+          fi
+          file src/axel
+          lipo -info src/axel || true
+
+      - name: Create distributable package
+        run: |
+          mkdir -p axel-macos-${{ matrix.arch }}/usr/local/bin
+          mkdir -p axel-macos-${{ matrix.arch }}/usr/local/share/man/man1
+          cp src/axel axel-macos-${{ matrix.arch }}/usr/local/bin/
+          [ -f doc/axel.1 ] && cp doc/axel.1 axel-macos-${{ matrix.arch }}/usr/local/share/man/man1/ || true
+          tar -czf axel-macos-${{ matrix.arch }}.tar.gz axel-macos-${{ matrix.arch }}/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: axel-macos-${{ matrix.arch }}
+          path: axel-macos-${{ matrix.arch }}.tar.gz
+          retention-days: 7
+
+  build-windows:
+    runs-on: windows-latest
+    name: Build Windows x86_64
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            vcvars: x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+            autoconf
+            automake
+            autoconf-archive
+            libtool
+            pkg-config
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-gettext
+            mingw-w64-x86_64-ca-certificates
+
+      - name: Generate build system
+        shell: msys2 {0}
+        env:
+          ACLOCAL_PATH: /mingw64/share/aclocal
+          CONFIG_SHELL: /usr/bin/bash
+        run: |
+          # Clean up any existing configure script that might be incompatible
+          rm -f configure config.status config.log
+          mkdir -p m4
+          # Create stub gettext macros for Windows to avoid MSYS2 bash syntax issues
+          # Since we use --disable-nls, these macros won't actually be used
+          cat > m4/gettext-stub.m4 << 'EOF'
+          AC_DEFUN([AM_GNU_GETTEXT], [])
+          AC_DEFUN([AM_GNU_GETTEXT_VERSION], [])
+          AC_DEFUN([AM_GNU_GETTEXT_NEED], [])
+          AC_DEFUN([AM_ICONV_LINK], [])
+          EOF
+          # Skip autopoint on Windows - causes MSYS2 bash syntax issues with generated configure
+          /usr/bin/bash -c "autoreconf -fiv -I m4 -I/mingw64/share/aclocal"
+
+      - name: Configure
+        shell: msys2 {0}
+        env:
+          CONFIG_SHELL: /usr/bin/bash
+        run: |
+          /usr/bin/bash ./configure \
+            --prefix=/mingw64 \
+            --with-ssl=openssl \
+            --disable-nls \
+            --disable-Werror
+
+      - name: Build
+        shell: msys2 {0}
+        run: make
+
+      - name: Create distributable package
+        shell: msys2 {0}
+        run: |
+          mkdir -p axel-windows-x86_64
+          cp src/axel.exe axel-windows-x86_64/
+          cp /mingw64/bin/libssl-*.dll axel-windows-x86_64/ 2>/dev/null || true
+          cp /mingw64/bin/libcrypto-*.dll axel-windows-x86_64/ 2>/dev/null || true
+          cp /mingw64/bin/libintl-*.dll axel-windows-x86_64/ 2>/dev/null || true
+          cp /mingw64/bin/libiconv-*.dll axel-windows-x86_64/ 2>/dev/null || true
+          zip -r axel-windows-x86_64.zip axel-windows-x86_64/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: axel-windows-x86_64
+          path: axel-windows-x86_64.zip
+          retention-days: 7
